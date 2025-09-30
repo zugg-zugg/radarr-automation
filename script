@@ -1,0 +1,69 @@
+#This Script is responsible for interlacing Radarr’s requests and automation to download missing movies to the qbittorent seedbox platform. These are pulled down locally into a directory under the /media/incoming folder on the array so that Radarr may process it accordingly.
+
+#!/bin/bash
+
+# ====== Configuration ======
+TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+LOG_FILE="/mnt/user/logs/Radarr_import.log"
+RADARR_API_KEY="API-KEY-HERE"
+RADARR_URL="http://localhost:7878"
+RADARR_IMPORT_PATH="/mnt/user/media/incoming"
+RCLONE_DEST_PATH="/data/incoming"  # Path inside rclone container
+RCLONE_CONTAINER="" # This should be the name of your docker container running rclone. Example - "binhex-rclone"
+# ============================
+
+# Ensure log directory exists
+mkdir -p "$(dirname "$LOG_FILE")"
+
+echo "[$TIMESTAMP] Starting rclone sync via Docker..." >> "$LOG_FILE"
+
+docker exec "$RCLONE_CONTAINER" rclone sync \
+  seedbox:/home/hd35/zuggzugg/Downloads/bittorrent \
+  "$RCLONE_DEST_PATH" \
+  --create-empty-src-dirs --progress >> "$LOG_FILE" 2>&1
+
+echo "[$TIMESTAMP] ✅ rclone sync completed." >> "$LOG_FILE"
+
+# ====== Extract any .rar archives ======
+echo "[$TIMESTAMP] Scanning for .rar files to extract..." >> "$LOG_FILE"
+
+find "$RADARR_IMPORT_PATH" -type f -iname '*.rar' | while read -r rarfile; do
+    extract_dir="$(dirname "$rarfile")"
+    echo "[$TIMESTAMP] Extracting: $rarfile into $extract_dir" >> "$LOG_FILE"
+    
+    # Perform extraction
+    unrar x -o+ "$rarfile" "$extract_dir" >> "$LOG_FILE" 2>&1
+
+    # Optional: delete archive parts after extraction
+    echo "[$TIMESTAMP] Cleaning up .rar parts in $extract_dir" >> "$LOG_FILE"
+    find "$extract_dir" -maxdepth 1 -type f \( -iname '*.rar' -o -iname '*.r[0-9][0-9]' \) -delete
+done
+
+echo "[$TIMESTAMP] ✅ Extraction complete." >> "$LOG_FILE"
+
+# ====== Trigger RADARR import ======
+echo "[$TIMESTAMP] Starting RADARR import for: $RADARR_IMPORT_PATH" >> "$LOG_FILE"
+
+RESPONSE=$(curl -s -w "\nHTTP_STATUS_CODE:%{http_code}" -X POST "${RADARR_URL}/api/v3/command" \
+     -H "X-Api-Key: ${RADARR_API_KEY}" \
+     -H "Content-Type: application/json" \
+     -d "{\"name\": \"manualImport\", \"path\": \"${RADARR_IMPORT_PATH}\", \"importMode\": \"move\"}")
+
+HTTP_CODE=$(echo "$RESPONSE" | grep HTTP_STATUS_CODE | cut -d: -f2)
+BODY=$(echo "$RESPONSE" | sed '/HTTP_STATUS_CODE/d')
+
+if [ "$HTTP_CODE" == "201" ] || [ "$HTTP_CODE" == "200" ]; then
+    echo "[$TIMESTAMP] ✅ RADARR import successful." >> "$LOG_FILE"
+else
+    echo "[$TIMESTAMP] ❌ ERROR - RADARR returned HTTP $HTTP_CODE" >> "$LOG_FILE"
+    echo "[$TIMESTAMP] Response body: $BODY" >> "$LOG_FILE"
+fi
+
+# ====== Optional: Clean old logs ======
+find "$(dirname "$LOG_FILE")" -name "$(basename "$LOG_FILE")" -mtime +30 -delete
+
+# ====== Fix permissions (in case rclone writes as root) ======
+chown -R nobody:users "$RADARR_IMPORT_PATH"
+
+
+
