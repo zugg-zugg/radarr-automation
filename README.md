@@ -19,6 +19,9 @@ This Script interlaces Radarr's requests and automation to download, extract and
 - The script downloads all new media or rar files locally and for those compressed it extracts them and cleans up the rar files afterward.
 - Pointing your Radarr to monitor this local folder it can then manage the newly obtained media, rename and move it to the appropriate sub folder that is monitored by your Plex or Emby server.
 
+# V3 Updates
++ Added RCLONE_CONFIG_PATH="/config/rclone/config/rclone.conf" (default) Allowing you to specify a unique location for the rclone config itself.
+
 # V2 Updates
 + Cleaned up and added descriptions and spaced out the variables.
 + Added rudimentary throttling of the downloads. V1 did not have any throttling or management in this sense. IF you had 10 things to download it would attempt to download all file at once and cause bottlenecks in most cases.
