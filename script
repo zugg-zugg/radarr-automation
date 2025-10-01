@@ -1,69 +1,132 @@
-#This Script is responsible for interlacing Radarr’s requests and automation to download missing movies to the qbittorent seedbox platform. These are pulled down locally into a directory under the /media/incoming folder on the array so that Radarr may process it accordingly.
-
 #!/bin/bash
+set -o pipefail
 
 # ====== Configuration ======
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
 LOG_FILE="/mnt/user/logs/Radarr_import.log"
+
 RADARR_API_KEY="API-KEY-HERE"
 RADARR_URL="http://localhost:7878"
+
+# Local path where files land (mounted into your rclone container as /data)
 RADARR_IMPORT_PATH="/mnt/user/media/incoming"
-RCLONE_DEST_PATH="/data/incoming"  # Path inside rclone container
-RCLONE_CONTAINER="" # This should be the name of your docker container running rclone. Example - "binhex-rclone"
+
+# Path *inside* the rclone container that maps to RADARR_IMPORT_PATH
+RCLONE_DEST_PATH="/data/incoming"
+
+# Name of your rclone Docker container (e.g., binhex-rclone)
+RCLONE_CONTAINER="binhex-rclone"
+
+# Remote + path - This is tied to your RClone config that needs to be configured prior.
+RCLONE_REMOTE="rcloneconfig:/home/path/path/"
+
+# Throttling/Staggering controls:
+RCLONE_TRANSFERS=1          # 1 = sequential transfers (staggered)
+RCLONE_CHECKERS=2           # keep metadata checks light
+RCLONE_BWLIMIT=""           # e.g., "8M" to cap to ~8 MiB/s; leave empty for no cap
 # ============================
 
-# Ensure log directory exists
-mkdir -p "$(dirname "$LOG_FILE")"
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE" ; }
 
-echo "[$TIMESTAMP] Starting rclone sync via Docker..." >> "$LOG_FILE"
+# Ensure log dir + import dir exist
+mkdir -p "$(dirname "$LOG_FILE")" "$RADARR_IMPORT_PATH"
 
-docker exec "$RCLONE_CONTAINER" rclone sync \
-  seedbox:/home/hd35/zuggzugg/Downloads/bittorrent \
-  "$RCLONE_DEST_PATH" \
-  --create-empty-src-dirs --progress >> "$LOG_FILE" 2>&1
+log "Starting rclone sync via Docker (sequential transfers)..."
 
-echo "[$TIMESTAMP] ✅ rclone sync completed." >> "$LOG_FILE"
+# Build rclone args
+RARGS=(sync
+  "$RCLONE_REMOTE"
+  "$RCLONE_DEST_PATH"
+  --create-empty-src-dirs
+  --transfers="$RCLONE_TRANSFERS"
+  --checkers="$RCLONE_CHECKERS"
+  --progress
+  --stats=30s
+)
+
+# Optional bandwidth limit
+if [[ -n "$RCLONE_BWLIMIT" ]]; then
+  RARGS+=(--bwlimit "$RCLONE_BWLIMIT")
+fi
+
+# Run rclone inside the container
+if [[ -z "$RCLONE_CONTAINER" ]]; then
+  log "❌ ERROR: RCLONE_CONTAINER is empty. Set the container name running rclone (e.g., binhex-rclone)."
+  exit 1
+fi
+
+docker exec "$RCLONE_CONTAINER" rclone "${RARGS[@]}" >> "$LOG_FILE" 2>&1
+RC=$?
+
+if [[ $RC -ne 0 ]]; then
+  log "❌ rclone sync failed with exit code $RC"
+  exit $RC
+fi
+
+log "✅ rclone sync completed."
 
 # ====== Extract any .rar archives ======
-echo "[$TIMESTAMP] Scanning for .rar files to extract..." >> "$LOG_FILE"
+log "Scanning for .rar files to extract..."
 
-find "$RADARR_IMPORT_PATH" -type f -iname '*.rar' | while read -r rarfile; do
+# Use unrar if available; fall back to 7z if needed
+EXTRACTOR=""
+if command -v unrar >/dev/null 2>&1; then
+  EXTRACTOR="unrar x -o+"
+elif command -v 7z >/dev/null 2>&1; then
+  EXTRACTOR="7z x -y"
+else
+  log "❌ No extractor found (need 'unrar' or '7z'). Skipping extraction."
+fi
+
+if [[ -n "$EXTRACTOR" ]]; then
+  # Find only the *first* part archives to avoid double-extract
+  # Match .rar and .part1.rar (common patterns)
+  while IFS= read -r rarfile; do
     extract_dir="$(dirname "$rarfile")"
-    echo "[$TIMESTAMP] Extracting: $rarfile into $extract_dir" >> "$LOG_FILE"
-    
-    # Perform extraction
-    unrar x -o+ "$rarfile" "$extract_dir" >> "$LOG_FILE" 2>&1
+    log "Extracting: $rarfile into $extract_dir"
+    $EXTRACTOR "$rarfile" -o"$extract_dir" >> "$LOG_FILE" 2>&1
 
-    # Optional: delete archive parts after extraction
-    echo "[$TIMESTAMP] Cleaning up .rar parts in $extract_dir" >> "$LOG_FILE"
-    find "$extract_dir" -maxdepth 1 -type f \( -iname '*.rar' -o -iname '*.r[0-9][0-9]' \) -delete
-done
+    # Cleanup archive parts in that directory after successful extract
+    log "Cleaning up archive parts in $extract_dir"
+    find "$extract_dir" -maxdepth 1 -type f \
+      \( -iname '*.rar' -o -iname '*.r[0-9][0-9]' -o -iname '*.rev' -o -iname '*.part[0-9]*.rar' \) \
+      -delete 2>>"$LOG_FILE"
+  done < <(find "$RADARR_IMPORT_PATH" -type f \( -iname '*.part1.rar' -o -iname '*.rar' \))
+fi
 
-echo "[$TIMESTAMP] ✅ Extraction complete." >> "$LOG_FILE"
+log "✅ Extraction complete."
 
 # ====== Trigger RADARR import ======
-echo "[$TIMESTAMP] Starting RADARR import for: $RADARR_IMPORT_PATH" >> "$LOG_FILE"
+log "Starting RADARR import for: $RADARR_IMPORT_PATH"
 
 RESPONSE=$(curl -s -w "\nHTTP_STATUS_CODE:%{http_code}" -X POST "${RADARR_URL}/api/v3/command" \
      -H "X-Api-Key: ${RADARR_API_KEY}" \
      -H "Content-Type: application/json" \
      -d "{\"name\": \"manualImport\", \"path\": \"${RADARR_IMPORT_PATH}\", \"importMode\": \"move\"}")
 
-HTTP_CODE=$(echo "$RESPONSE" | grep HTTP_STATUS_CODE | cut -d: -f2)
+HTTP_CODE=$(echo "$RESPONSE" | awk -F: '/HTTP_STATUS_CODE/ {print $2}')
 BODY=$(echo "$RESPONSE" | sed '/HTTP_STATUS_CODE/d')
 
-if [ "$HTTP_CODE" == "201" ] || [ "$HTTP_CODE" == "200" ]; then
-    echo "[$TIMESTAMP] ✅ RADARR import successful." >> "$LOG_FILE"
+if [[ "$HTTP_CODE" == "201" || "$HTTP_CODE" == "200" ]]; then
+  log "✅ RADARR import successful."
 else
-    echo "[$TIMESTAMP] ❌ ERROR - RADARR returned HTTP $HTTP_CODE" >> "$LOG_FILE"
-    echo "[$TIMESTAMP] Response body: $BODY" >> "$LOG_FILE"
+  log "❌ ERROR - RADARR returned HTTP $HTTP_CODE"
+  log "Response body: $BODY"
 fi
 
-# ====== Optional: Clean old logs ======
-find "$(dirname "$LOG_FILE")" -name "$(basename "$LOG_FILE")" -mtime +30 -delete
-
 # ====== Fix permissions (in case rclone writes as root) ======
-chown -R nobody:users "$RADARR_IMPORT_PATH"
+if chown -R nobody:users "$RADARR_IMPORT_PATH" 2>>"$LOG_FILE"; then
+  log "✅ Permissions fixed on $RADARR_IMPORT_PATH"
+else
+  log "⚠️  Could not chown $RADARR_IMPORT_PATH (check permissions)."
+fi
+
+# ====== Optional: Clean old logs (rotate by age) ======
+# Keeps only logs older than 30 days removed (file name match safeguard)
+find "$(dirname "$LOG_FILE")" -type f -name "$(basename "$LOG_FILE")" -mtime +30 -delete 2>>"$LOG_FILE"
+
+log "🏁 Script completed."
+
 
 
 
