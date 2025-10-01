@@ -3,9 +3,9 @@ set -o pipefail
 
 # ====== Configuration ======
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
-LOG_FILE="/mnt/user/logs/Radarr_import.log"
+LOG_FILE="/mnt/user/logs/RADARR_import.log"
 
-RADARR_API_KEY="API-KEY-HERE"
+RADARR_API_KEY="API-KEY"
 RADARR_URL="http://localhost:7878"
 
 # Local path where files land (mounted into your rclone container as /data)
@@ -16,9 +16,10 @@ RCLONE_DEST_PATH="/data/incoming"
 
 # Name of your rclone Docker container (e.g., binhex-rclone)
 RCLONE_CONTAINER="binhex-rclone"
+RCLONE_CONFIG_PATH="/config/rclone/config/rclone.conf"   # Inside the rclone container
 
 # Remote + path - This is tied to your RClone config that needs to be configured prior.
-RCLONE_REMOTE="rcloneconfig:/home/path/path/"
+RCLONE_REMOTE="sample:/home/path/"
 
 # Throttling/Staggering controls:
 RCLONE_TRANSFERS=1          # 1 = sequential transfers (staggered)
@@ -35,6 +36,7 @@ log "Starting rclone sync via Docker (sequential transfers)..."
 
 # Build rclone args
 RARGS=(sync
+   --config="$RCLONE_CONFIG_PATH"
   "$RCLONE_REMOTE"
   "$RCLONE_DEST_PATH"
   --create-empty-src-dirs
@@ -126,7 +128,3 @@ fi
 find "$(dirname "$LOG_FILE")" -type f -name "$(basename "$LOG_FILE")" -mtime +30 -delete 2>>"$LOG_FILE"
 
 log "🏁 Script completed."
-
-
-
-
