@@ -18,7 +18,7 @@ RCLONE_DEST_PATH="/data/incoming"
 RCLONE_CONTAINER="binhex-rclone"
 
 # Remote + path - This is tied to your RClone config that needs to be configured prior.
-RCLONE_REMOTE="seedbox:/home/hd35/zuggzugg/Downloads/bittorrent"
+RCLONE_REMOTE="rcloneconfig:/home/path/path/"
 
 # Throttling/Staggering controls:
 RCLONE_TRANSFERS=1          # 1 = sequential transfers (staggered)
